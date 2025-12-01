@@ -1,0 +1,2 @@
+gpu_name,model_name,tensor_parallel_size,num_concurrent_requests,max_output_tokens,prompt_tokens_per_request,prefill_wall_time_seconds,decode_wall_time_seconds,total_time_seconds
+RTX-4090,qwen3-8b,1,16,128,7,0.0534,2.4651,2.5185
