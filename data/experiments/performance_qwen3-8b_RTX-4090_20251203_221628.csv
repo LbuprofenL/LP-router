@@ -1,0 +1,10 @@
+gpu_name,model_name,tensor_parallel_size,num_concurrent_requests,max_output_tokens,prompt_tokens_per_request,prefill_wall_time_seconds,decode_wall_time_seconds,total_time_seconds,avg_power_watts,total_energy_joules
+RTX-4090,qwen3-8b,1,16,128,7,0.0474,2.4683,2.5157,267.77,638.01
+RTX-4090,qwen3-8b,1,16,256,7,0.0492,5.0140,5.0631,267.10,1316.96
+RTX-4090,qwen3-8b,1,16,512,7,0.0550,10.2288,10.2838,268.82,2732.77
+RTX-4090,qwen3-8b,1,32,128,7,0.0557,2.6127,2.6684,282.14,709.88
+RTX-4090,qwen3-8b,1,32,256,7,0.0569,5.3158,5.3726,287.17,1497.83
+RTX-4090,qwen3-8b,1,32,512,7,0.0570,11.0075,11.0645,289.35,3139.58
+RTX-4090,qwen3-8b,1,64,128,7,0.1042,2.8191,2.9233,299.48,819.95
+RTX-4090,qwen3-8b,1,64,256,7,0.0998,5.8458,5.9456,301.87,1758.80
+RTX-4090,qwen3-8b,1,64,512,7,0.0890,12.3918,12.4809,305.45,3771.68

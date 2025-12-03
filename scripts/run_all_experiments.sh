@@ -33,10 +33,13 @@ CONTAINER_ID=$(docker run \
   --name automated-vllm-runner \
   --entrypoint /bin/bash \
   -v /data/lxl/models/LP-router:/models \
-  -v "$PROJECT_ROOT/scripts/calibrate_hardware.py:/app/experiment.py" \
-  -v "$PROJECT_ROOT/data/experiments:/app/results" \
+  -v "$PROJECT_ROOT:/app" \
+  -w /app \
   $DOCKER_IMAGE \
   -c "tail -f /dev/null") # 使用 tail 命令让容器保持运行
+
+echo "在容器内安装 pynvml 依赖..."
+docker exec "$CONTAINER_ID" pip install nvidia-ml-py
 
 # 检查容器是否成功启动
 if [ -z "$CONTAINER_ID" ]; then
@@ -55,12 +58,12 @@ for concurrency in "${CONCURRENCY_LEVELS[@]}"; do
     echo "======================================================"
     
     # 使用 docker exec 在正在运行的容器内执行命令
-    docker exec $CONTAINER_ID python3 /app/experiment.py \
+    docker exec $CONTAINER_ID python3 /app/scripts/calibrate_hardware.py \
       --gpu $GPU_NAME \
-      --model-path $MODEL_PATH \
+      --model-path /models/$MODEL_NAME \
       --num-requests $concurrency \
       --max-tokens $tokens \
-      --output-csv /app/results/$OUTPUT_FILE
+      --output-csv /app/data/experiments/$OUTPUT_FILE
     
   done
 done

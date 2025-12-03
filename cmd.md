@@ -39,8 +39,8 @@ python scripts/plot_from_csv.py \
   --output-image figures/4090_performance_analysis_opt_v2.png
 ## qwen3
 python scripts/plot_from_csv.py \
-  --csv-file data/experiments/performance_data_qwen3.csv \
+  --csv-file data/experiments/performance_qwen3-8b_RTX-4090_20251203_221628.csv \
   --gpu RTX-4090 \
-  --output-image figures/4090_performance_analysis_qwen3_v2.png
+  --output-image performance_analysis_qwen3-8b_RTX-4090_20251203_221628.png
 
 # run all 
