@@ -10,14 +10,20 @@ MAX_TOKENS_LIST=(128 256 512)
 MODEL_NAME="qwen3-8b"
 MODEL_PATH="/models/qwen3-8b"
 GPU_NAME="RTX-4090"
-OUTPUT_FILE="performance_data_qwen3.csv"
 
 # --- 准备工作 ---
-# 确保结果和模型目录存在
-mkdir -p results
+# 获取脚本所在目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# 如果旧的结果文件存在，先删除
-rm -f $OUTPUT_FILE
+# 自动生成输出文件名：包含模型名、GPU名和时间戳
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+OUTPUT_FILE="performance_${MODEL_NAME}_${GPU_NAME}_${TIMESTAMP}.csv"
+
+# 确保结果目录存在
+mkdir -p "$PROJECT_ROOT/data/experiments"
+
+echo "输出文件: $OUTPUT_FILE"
 
 # --- 启动一个后台运行的、持久化的容器 ---
 echo "正在启动一个后台实验容器..."
@@ -26,9 +32,9 @@ CONTAINER_ID=$(docker run \
   --gpus all \
   --name automated-vllm-runner \
   --entrypoint /bin/bash \
-  -v /data/lxl/models/roofline:/models \
-  -v /data/lxl/projects/roofline/experiment_data_collector.py:/app/experiment.py \
-  -v /data/lxl/projects/roofline/results:/app/results \
+  -v /data/lxl/models/LP-router:/models \
+  -v "$PROJECT_ROOT/scripts/calibrate_hardware.py:/app/experiment.py" \
+  -v "$PROJECT_ROOT/data/experiments:/app/results" \
   $DOCKER_IMAGE \
   -c "tail -f /dev/null") # 使用 tail 命令让容器保持运行
 
@@ -64,4 +70,6 @@ echo "所有实验完成，正在停止并删除容器..."
 docker stop $CONTAINER_ID
 docker rm $CONTAINER_ID
 
-echo "实验数据已保存在主机的: $OUTPUT_FILE"
+echo "======================================================"
+echo "实验数据已保存在: $PROJECT_ROOT/data/experiments/$OUTPUT_FILE"
+echo "======================================================"

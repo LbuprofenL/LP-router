@@ -1,0 +1,18 @@
+{
+  "RTX-4090": {
+    "name": "NVIDIA GeForce RTX 4090",
+    "peak_flops_fp16": 330000,
+    "mem_bandwidth_gb_s": 1008
+  },
+  "A100-80GB": {
+    "name": "NVIDIA A100-80GB",
+    "peak_flops_fp16": 312000,
+    "mem_bandwidth_gb_s": 1935
+  },
+  "H100-80GB": {
+    "name": "NVIDIA H100-80GB",
+    "peak_flops_fp16": 989000,
+    "mem_bandwidth_gb_s": 3350
+  }
+}
+

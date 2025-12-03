@@ -1,6 +1,7 @@
 import time
 import argparse
 import asyncio
+import json
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,29 +10,25 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm import SamplingParams
 
-# --- 1. 硬件和模型规格配置 ---
-# 在这里添加你想要测试的GPU和模型
-GPU_SPECS = {
-    "RTX-4090": {
-        "name": "NVIDIA GeForce RTX 4090",
-        "peak_flops_fp16": 82600,  # 82.6 TFLOP/s in GFLOP/s
-        "mem_bandwidth_gb_s": 1008   # 1008 GB/s
-    },
-    "A100-80GB": {
-        "name": "NVIDIA A100-80GB",
-        "peak_flops_fp16": 312000,  # 312 TFLOP/s in GFLOP/s for FP16 Tensor Core
-        "mem_bandwidth_gb_s": 1935   # 1935 GB/s
-    },
-    "H100-80GB": {
-        "name": "NVIDIA H100-80GB",
-        "peak_flops_fp16": 989000,  # 989 TFLOP/s in GFLOP/s for FP16 Tensor Core
-        "mem_bandwidth_gb_s": 3350   # 3350 GB/s
-    }
-}
+# 获取项目根目录
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-MODEL_SPECS = {
-    "opt-1.3b": {"params_b": 1.3, "bytes_per_param": 2}, # FP16 uses 2 bytes
-}
+# --- 1. 硬件和模型规格配置（从JSON文件加载）---
+def load_configs():
+    """从配置文件加载GPU和模型规格"""
+    gpu_specs_path = os.path.join(PROJECT_ROOT, "configs", "gpu_specs.json")
+    model_specs_path = os.path.join(PROJECT_ROOT, "configs", "model_specs.json")
+    
+    with open(gpu_specs_path, 'r', encoding='utf-8') as f:
+        gpu_specs = json.load(f)
+    
+    with open(model_specs_path, 'r', encoding='utf-8') as f:
+        model_specs = json.load(f)
+    
+    return gpu_specs, model_specs
+
+GPU_SPECS, MODEL_SPECS = load_configs()
 
 # --- 2. Roofline 绘图函数 ---
 def plot_roofline(gpu_spec, performance_point, save_path="roofline_plot.png"):
@@ -79,7 +76,8 @@ def plot_roofline(gpu_spec, performance_point, save_path="roofline_plot.png"):
     plt.grid(True, which="both", ls="--")
     plt.legend()
     
-    # 保存图表
+    # 确保输出目录存在
+    os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
     plt.savefig(save_path, dpi=300)
     print(f"Roofline图已保存到: {save_path}")
     plt.show()
@@ -180,9 +178,17 @@ if __name__ == "__main__":
     parser.add_argument("--tensor-parallel-size", type=int, default=2, help="张量并行的GPU数量")
     parser.add_argument("--num-requests", type=int, default=32, help="模拟的并发请求数量")
     parser.add_argument("--max-tokens", type=int, default=256, help="每个请求生成的最大Token数")
-    parser.add_argument("--output-image", type=str, default="roofline_result.png",
-                        help="保存Roofline图的文件名")
+    parser.add_argument("--output-image", type=str, default=None,
+                        help="保存Roofline图的文件名（默认保存到figures/目录）")
                         
     args = parser.parse_args()
+    
+    # 如果未指定输出路径，使用默认路径
+    if args.output_image is None:
+        args.output_image = os.path.join(PROJECT_ROOT, "figures", f"{args.gpu}_{args.model_name}_roofline.png")
+    elif not os.path.isabs(args.output_image):
+        # 相对路径转换为绝对路径（相对于figures目录）
+        args.output_image = os.path.join(PROJECT_ROOT, "figures", args.output_image)
+    
     # vLLM的异步引擎需要在事件循环中运行
     asyncio.run(main(args))

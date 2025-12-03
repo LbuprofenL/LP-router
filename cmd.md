@@ -4,13 +4,13 @@ docker run \
   -it \
   --name vllm-data-collection \
   --entrypoint /bin/bash \
-  -v /data/lxl/models/roofline:/models \
-  -v /data/lxl/projects/roofline/experiment_data_collector.py:/app/experiment.py \
-  -v /data/lxl/projects/roofline/results:/app/results \
+  -v /data/lxl/models/LP-router:/models \
+  -v /data/lxl/projects/LP-router/scripts/calibrate_hardware.py:/app/experiment.py \
+  -v /data/lxl/projects/LP-router/data/experiments:/app/results \
   vllm/vllm-openai:v0.8.5.post1
 
 # 临时
-docker run -it --rm --gpus all -v /data/lxl/models/roofline:/models --entrypoint /bin/bash vllm/vllm-openai:v0.8.5.post1
+docker run -it --rm --gpus all -v /data/lxl/models/LP-router:/models --entrypoint /bin/bash vllm/vllm-openai:v0.8.5.post1
 
 
 # 在容器的bash里
@@ -33,14 +33,14 @@ python3 experiment.py \
 
 # 绘图命令
 ## opt-1.3b
-python plot_from_csv.py \
-  --csv-file ./results/final_performance_data.csv \
+python scripts/plot_from_csv.py \
+  --csv-file data/experiments/final_performance_data.csv \
   --gpu RTX-4090 \
-  --output-image 4090_performance_analysis_opt_v2.png
+  --output-image figures/4090_performance_analysis_opt_v2.png
 ## qwen3
-python plot_from_csv.py \
-  --csv-file ./results/performance_data_qwen3.csv \
+python scripts/plot_from_csv.py \
+  --csv-file data/experiments/performance_data_qwen3.csv \
   --gpu RTX-4090 \
-  --output-image 4090_performance_analysis_qwen3_v2.png
+  --output-image figures/4090_performance_analysis_qwen3_v2.png
 
 # run all 

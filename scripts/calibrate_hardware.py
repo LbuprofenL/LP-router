@@ -3,11 +3,22 @@ import argparse
 import asyncio
 import csv
 import os
+import sys
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm import SamplingParams
 from transformers import AutoTokenizer
+
+# 获取项目根目录
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
+# 添加项目根目录到路径，以便导入 src 模块
+sys.path.insert(0, PROJECT_ROOT)
+
+from src.monitor import PowerMonitor
+
 
 async def main(args: argparse.Namespace):
     """
@@ -51,7 +62,13 @@ async def main(args: argparse.Namespace):
 
     # --- [4/4] 执行并发测试（单次流式生成内分离prefill/decode） ---
     print("--- [4/4] 正在执行并发性能测试... ---")
-
+    
+    # 初始化并启动功耗监控
+    target_devices = list(range(args.tensor_parallel_size)) 
+    power_monitor = PowerMonitor(device_ids=target_devices, sampling_interval=0.1)
+    power_monitor.initialize()
+    power_monitor.start()
+    
     start_time = time.time()
 
     first_token_times = [None] * args.num_requests
@@ -82,19 +99,45 @@ async def main(args: argparse.Namespace):
     await asyncio.gather(*tasks)
 
     end_time = time.time()
+    
+    # 立即停止功耗监控
+    power_monitor.stop()
 
     latest_first_token_time = max(t for t in first_token_times if t is not None)
     prefill_wall_time = latest_first_token_time - start_time
     total_time = end_time - start_time
     decode_wall_time = total_time - prefill_wall_time
+    
+    # 计算能耗
+    prefill_end_time = start_time + prefill_wall_time
+    total_energy_joules, avg_power_watts, prefill_avg_power, decode_avg_power = \
+        power_monitor.calculate_energy(start_time, end_time, prefill_end_time)
+    
+    # 关闭功耗监控器
+    power_monitor.shutdown()
 
     print(f"\n--- 测试完成 ---")
     print(f"Prefill阶段壁钟耗时: {prefill_wall_time:.4f} 秒")
     print(f"Decode阶段壁钟耗时: {decode_wall_time:.4f} 秒")
     print(f"总壁钟耗时: {total_time:.4f} 秒")
+    print(f"\n--- 功耗统计 ---")
+    print(f"平均功耗: {avg_power_watts:.2f} 瓦")
+    print(f"Prefill阶段平均功耗: {prefill_avg_power:.2f} 瓦")
+    print(f"Decode阶段平均功耗: {decode_avg_power:.2f} 瓦")
+    print(f"总能耗: {total_energy_joules:.2f} 焦耳 ({total_energy_joules/3600:.4f} 瓦时)")
 
     # --- 保存结果到CSV文件 ---
-    csv_file = args.output_csv
+    if args.output_csv is None:
+        # 默认保存到 data/experiments/ 目录
+        csv_file = os.path.join(PROJECT_ROOT, "data", "experiments", "raw_performance_data.csv")
+    else:
+        csv_file = args.output_csv
+        # 如果是相对路径，相对于 data/experiments/ 目录
+        if not os.path.isabs(csv_file):
+            csv_file = os.path.join(PROJECT_ROOT, "data", "experiments", csv_file)
+    
+    # 确保目录存在
+    os.makedirs(os.path.dirname(csv_file), exist_ok=True)
     file_exists = os.path.isfile(csv_file)
     
     with open(csv_file, mode='a', newline='', encoding='utf-8') as f:
@@ -109,7 +152,9 @@ async def main(args: argparse.Namespace):
                 "prompt_tokens_per_request",
                 "prefill_wall_time_seconds",
                 "decode_wall_time_seconds",
-                "total_time_seconds"
+                "total_time_seconds",
+                "avg_power_watts",
+                "total_energy_joules"
             ])
         
         writer.writerow([
@@ -121,7 +166,9 @@ async def main(args: argparse.Namespace):
             prompt_tokens_per_request,
             f"{prefill_wall_time:.4f}",
             f"{decode_wall_time:.4f}",
-            f"{total_time:.4f}"
+            f"{total_time:.4f}",
+            f"{avg_power_watts:.2f}",
+            f"{total_energy_joules:.2f}"
         ])
     
     print(f"分别统计的性能数据已追加到: {csv_file}")
@@ -134,7 +181,7 @@ if __name__ == "__main__":
     parser.add_argument("--tensor-parallel-size", type=int, default=1, help="张量并行的GPU数量")
     parser.add_argument("--num-requests", type=int, default=16, help="模拟的并发请求数量")
     parser.add_argument("--max-tokens", type=int, default=128, help="每个请求生成的最大Token数")
-    parser.add_argument("--output-csv", type=str, default="raw_performance_data.csv", help="保存原始数据的CSV文件名")
+    parser.add_argument("--output-csv", type=str, default=None, help="保存原始数据的CSV文件名（默认保存到data/experiments/目录）")
                         
     args = parser.parse_args()
     asyncio.run(main(args))

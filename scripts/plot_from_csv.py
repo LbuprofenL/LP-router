@@ -1,44 +1,30 @@
 import argparse
+import json
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# --- 硬件和模型规格配置---
-GPU_SPECS = {
-    "RTX-4090": {
-        "name": "NVIDIA GeForce RTX 4090",
-        "peak_flops_fp16": 330000,
-        "mem_bandwidth_gb_s": 1008
-    }
-}
+# 获取项目根目录（脚本所在目录的父目录）
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-MODEL_SPECS = {
-    "facebook-opt-1.3b": {
-        "params_b": 1.3,
-        "bytes_per_param": 2,
-        "arch": {
-            "hidden_size": 2048,
-            "num_hidden_layers": 24,
-            "num_attention_heads": 32,
-            "num_key_value_heads": 32,
-            "intermediate_size": 8192,
-            "bytes_per_elem": 2
-        }
-    },
-    "qwen3-8b": {
-        "params_b": 8.2,
-        "bytes_per_param": 2,
-        "arch": {
-            "hidden_size": 4096,
-            "num_hidden_layers": 36,
-            "num_attention_heads": 32,
-            "num_key_value_heads": 8,
-            "intermediate_size": 22016,
-            "bytes_per_elem": 2
-        }
-    },
-}
+# --- 硬件和模型规格配置（从JSON文件加载）---
+def load_configs():
+    """从配置文件加载GPU和模型规格"""
+    gpu_specs_path = os.path.join(PROJECT_ROOT, "configs", "gpu_specs.json")
+    model_specs_path = os.path.join(PROJECT_ROOT, "configs", "model_specs.json")
+    
+    with open(gpu_specs_path, 'r', encoding='utf-8') as f:
+        gpu_specs = json.load(f)
+    
+    with open(model_specs_path, 'r', encoding='utf-8') as f:
+        model_specs = json.load(f)
+    
+    return gpu_specs, model_specs
+
+GPU_SPECS, MODEL_SPECS = load_configs()
 
 def estimate_flops_and_bytes_decoder(num_concurrent_requests,
                                      prompt_tokens_per_request,
@@ -186,6 +172,8 @@ def plot_roofline(gpu_spec, performance_points, save_path):
     sns.despine()
     plt.tight_layout(rect=[0, 0, 0.85, 1]) # 调整布局为图例留出空间
     
+    # 确保输出目录存在
+    os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
     plt.savefig(save_path, dpi=300)
     print(f"Roofline图已保存到: {save_path}")
     plt.show()
@@ -243,7 +231,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="从CSV数据生成Roofline图")
     parser.add_argument("--csv-file", type=str, required=True, help="包含原始性能数据的CSV文件路径")
     parser.add_argument("--gpu", type=str, required=True, choices=list(GPU_SPECS.keys()), help="要为其绘图的GPU型号")
-    parser.add_argument("--output-image", type=str, default="roofline_analysis.png", help="输出的图表文件名")
+    parser.add_argument("--output-image", type=str, default=None, help="输出的图表文件名（默认保存到figures/目录）")
     
     args = parser.parse_args()
+    
+    # 如果未指定输出路径，使用默认路径
+    if args.output_image is None:
+        csv_basename = os.path.splitext(os.path.basename(args.csv_file))[0]
+        args.output_image = os.path.join(PROJECT_ROOT, "figures", f"{args.gpu}_roofline_{csv_basename}.png")
+    elif not os.path.isabs(args.output_image):
+        # 相对路径转换为绝对路径（相对于figures目录）
+        args.output_image = os.path.join(PROJECT_ROOT, "figures", args.output_image)
+    
     main(args)
