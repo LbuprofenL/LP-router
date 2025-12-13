@@ -1,52 +1,36 @@
-"""
-Predictor: 封装 DistilBERT 或线性回归模型进行性能预测
-"""
-# TODO: 实现性能预测模型
-# 可以使用 DistilBERT 或简单的线性回归模型
+# src/predictor.py
+import json
+import os
 
-
-class PerformancePredictor:
-    """
-    性能预测器基类
-    """
-    
-    def __init__(self, model_type="linear"):
-        """
-        初始化预测器
-        
-        Args:
-            model_type: 模型类型 ("linear" 或 "distilbert")
-        """
-        self.model_type = model_type
-        self.model = None
-    
-    def train(self, X, y):
-        """
-        训练预测模型
-        
-        Args:
-            X: 特征数据
-            y: 目标值
-        """
-        raise NotImplementedError("子类需要实现 train 方法")
-    
-    def predict(self, X):
-        """
-        预测性能
-        
-        Args:
-            X: 特征数据
+class LatencyPredictor:
+    def __init__(self, gpu_specs_path, model_specs_path):
+        # 加载你之前标定好的 json
+        with open(gpu_specs_path) as f:
+            self.gpu_specs = json.load(f)
+        with open(model_specs_path) as f:
+            self.model_specs = json.load(f)
             
-        Returns:
-            预测结果
-        """
-        raise NotImplementedError("子类需要实现 predict 方法")
-    
-    def save(self, path):
-        """保存模型"""
-        raise NotImplementedError("子类需要实现 save 方法")
-    
-    def load(self, path):
-        """加载模型"""
-        raise NotImplementedError("子类需要实现 load 方法")
+        # 【关键】在这里写入你刚才决定的“人工接管参数”
+        # 物理上 Alpha=1.0, Beta=15ms
+        self.calibration = {
+            "RTX-4090": {"alpha": 1.0, "beta": 0.015},
+            "A100":     {"alpha": 1.0, "beta": 0.010}, # A100 启动可能更快，暂定
+        }
 
+    def _estimate_theoretical_latency(self, model_name, gpu_name, input_len, output_len, batch_size):
+        # 1. 搬运 estimate_flops_and_bytes_decoder 的逻辑
+        # 2. 记得一定要加上 【GQA 修正】！
+        # 3. 计算 T_theo = max(Compute, Memory)
+        # return T_theo
+        
+        pass
+
+    def predict(self, model_name, gpu_name, input_len, output_len, batch_size=1):
+        """
+        返回预测的 Latency (秒)
+        公式: T_pred = alpha * T_theo + beta
+        """
+        t_theo = self._estimate_theoretical_latency(...)
+        params = self.calibration.get(gpu_name, {"alpha": 1.0, "beta": 0.0})
+        
+        return params["alpha"] * t_theo + params["beta"]

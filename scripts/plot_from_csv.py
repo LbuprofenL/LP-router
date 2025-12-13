@@ -26,6 +26,67 @@ def load_configs():
 
 GPU_SPECS, MODEL_SPECS = load_configs()
 
+def calibrate_roofline_parameters(df, model_specs, gpu_spec):
+    """
+    使用线性回归拟合：实测时间 = alpha * 理论时间 + beta
+    返回:
+        alpha: 显存/计算开销修正系数 (Memory/Compute Overhead Factor)
+        beta: 固定运行时开销 (Runtime Overhead, seconds)
+    """
+    theoretical_times = []
+    real_times = []
+    
+    peak_flops = gpu_spec["peak_flops_fp16"] * 1e9
+    peak_bw = gpu_spec["mem_bandwidth_gb_s"] * 1e9
+
+    print("--- 正在执行 Roofline 自动标定 ---")
+    for _, row in df.iterrows():
+        model_spec = model_specs[row['model_name']]
+        
+        # 1. 获取理论计算量 (FLOPs) 和 理论数据搬运量 (Bytes)
+        # 注意：这里直接调用你现有的估算函数
+        if model_spec.get("arch"):
+             flops, bytes_theo = estimate_flops_and_bytes_decoder(
+                row["num_concurrent_requests"],
+                row.get("prompt_tokens_per_request", 0),
+                row["max_output_tokens"],
+                model_spec["arch"]
+            )
+        else:
+            # 简易估算 fallback
+            continue 
+
+        # 2. 计算 Roofline 理论最快时间 (瓶颈时间)
+        # Time = max( Compute_Time, Memory_Time )
+        time_compute = flops / peak_flops
+        time_memory = bytes_theo / peak_bw
+        time_theo = max(time_compute, time_memory)
+        
+        theoretical_times.append(time_theo)
+        real_times.append(row['total_time_seconds'])
+
+    # 3. 执行线性回归: Real = alpha * Theo + beta
+    if not theoretical_times:
+        return 1.0, 0.0
+
+    X = np.array(theoretical_times)
+    y = np.array(real_times)
+    
+    # 使用 numpy 进行一元线性拟合 (deg=1)
+    # z[0] 是斜率 (alpha), z[1] 是截距 (beta)
+    z = np.polyfit(X, y, 1) 
+    alpha = z[0]
+    beta = z[1]
+    
+    r_squared = 1 - (sum((y - (alpha * X + beta))**2) / ((len(y) - 1) * np.var(y, ddof=1) * len(y)))
+    
+    print(f"标定完成:")
+    print(f"  > Alpha (修正系数): {alpha:.4f} (含义: 实测比理论慢了 {(alpha-1)*100:.1f}%)")
+    print(f"  > Beta (固有开销):  {beta*1000:.2f} ms")
+    print(f"  > R^2 (拟合优度):   {r_squared:.4f}")
+    
+    return alpha, beta
+
 def estimate_flops_and_bytes_decoder(num_concurrent_requests,
                                      prompt_tokens_per_request,
                                      max_output_tokens,
@@ -41,6 +102,10 @@ def estimate_flops_and_bytes_decoder(num_concurrent_requests,
     L = float(arch["num_hidden_layers"])
     d_ff = float(arch["intermediate_size"])
     bytes_per_elem = float(arch.get("bytes_per_elem", 2))
+    num_q_heads = float(arch.get("num_attention_heads", 32))
+    num_kv_heads = float(arch.get("num_key_value_heads", num_q_heads))
+    head_dim = H / num_q_heads
+    kv_dim = head_dim * num_kv_heads
 
     # sum of context lengths
     sum_T_prefill = S_prompt * (S_prompt + 1.0) / 2.0
@@ -56,8 +121,8 @@ def estimate_flops_and_bytes_decoder(num_concurrent_requests,
     bytes_weights_per_layer_per_token = params_per_layer * bytes_per_elem
     bytes_weights_total = L * bytes_weights_per_layer_per_token * total_tokens
 
-    bytes_kv_prefill_per_layer = 2.0 * B * S_prompt * H * bytes_per_elem
-    bytes_kv_decode_per_layer = 2.0 * B * H * bytes_per_elem * (
+    bytes_kv_prefill_per_layer = 2.0 * B * S_prompt * kv_dim * bytes_per_elem
+    bytes_kv_decode_per_layer = 2.0 * B * kv_dim * bytes_per_elem * (
         S_decode +
         S_decode * S_prompt +
         S_decode * (S_decode + 1.0) / 2.0
@@ -67,14 +132,14 @@ def estimate_flops_and_bytes_decoder(num_concurrent_requests,
     total_bytes = bytes_weights_total + bytes_kv_total
     return total_flops, total_bytes
 
-def calculate_performance_point(model_spec, workload_params, total_time):
+def calculate_performance_point(model_spec, workload_params, total_time,alpha):
     """根据估算值和CSV中的数据计算性能点"""
     model_params = model_spec["params_b"] * 1e9
     bytes_per_param = model_spec["bytes_per_param"]
     total_generated_tokens = workload_params["num_concurrent_requests"] * workload_params["max_output_tokens"]
 
     if model_spec.get("arch"):
-        total_flops, total_bytes_moved = estimate_flops_and_bytes_decoder(
+        total_flops, total_bytes_theo = estimate_flops_and_bytes_decoder(
             workload_params["num_concurrent_requests"],
             workload_params.get("prompt_tokens_per_request", 0),
             workload_params["max_output_tokens"],
@@ -82,13 +147,14 @@ def calculate_performance_point(model_spec, workload_params, total_time):
         )
     else:
         total_flops = 2 * model_params * total_generated_tokens
-        total_bytes_moved = model_params * bytes_per_param * total_generated_tokens
+        total_bytes_theo = model_params * bytes_per_param * total_generated_tokens
 
-    if total_time == 0 or total_bytes_moved == 0:
+    if total_time == 0 or total_bytes_theo == 0:
         return 0, 0
+    corrected_bytes = total_bytes_theo * alpha
 
     gflops_per_sec = (total_flops / 1e9) / total_time
-    arithmetic_intensity = total_flops / total_bytes_moved
+    arithmetic_intensity = total_flops / corrected_bytes
     
     return arithmetic_intensity, gflops_per_sec
 
@@ -194,6 +260,10 @@ def main(args):
 
     print(f"已加载 {len(df_gpu)} 条关于 {args.gpu} 的实验数据。")
     
+    # 执行自动标定
+    gpu_spec = GPU_SPECS[args.gpu]
+    alpha, beta = calibrate_roofline_parameters(df_gpu, MODEL_SPECS, gpu_spec)
+    
     performance_points = []
     for index, row in df_gpu.iterrows():
         model_name_key = row['model_name']
@@ -209,7 +279,7 @@ def main(args):
         }
         total_time = row['total_time_seconds']
         
-        ai, gflops = calculate_performance_point(model_spec, workload_params, total_time)
+        ai, gflops = calculate_performance_point(model_spec, workload_params, total_time,alpha)
         
         point_data = row.to_dict()
         point_data['ai'] = ai
