@@ -1,3 +1,7 @@
 matplotlib
 seaborn
 nvidia-ml-py
+locust
+fastapi
+uvicorn
+pydantic

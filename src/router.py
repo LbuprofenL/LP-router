@@ -1,5 +1,6 @@
 # src/router.py
 import time
+import random
 import logging
 import numpy as np
 from typing import List, Dict, Tuple
@@ -7,199 +8,108 @@ from ortools.linear_solver import pywraplp
 
 # 引入你的模块（使用包内相对导入，避免路径问题）
 from .controller import GPUController
-# from .predictor import LatencyPredictor # TODO: 真正实现时取消注释
-
-# --- Mock Predictor (如果你还没写完 src/predictor.py，暂时用这个顶替) ---
-class MockPredictor:
-    def __init__(self):
-        # 这里填入我们刚才标定好的参数！
-        self.params = {
-            "RTX-4090": {"alpha": 1.0, "beta": 0.015, "bw": 852.77, "flops": 330000}, # Beta=15ms
-            "A100":     {"alpha": 1.0, "beta": 0.010, "bw": 1935.0, "flops": 312000},
-        }
-    
-    def predict(self, req, gpu_name):
-        # 简化的 Roofline 计算 (假设 Qwen-8B)
-        # AI ~ 60 (Decode)
-        input_len = req.get("prompt_len", 128)
-        output_len = req.get("output_len", 128)
-        
-        # 简单模拟：Latency = (Token * 0.01s) * alpha + beta
-        p = self.params.get(gpu_name, self.params["RTX-4090"])
-        
-        # 区分 Prefill 和 Decode (粗略)
-        t_prefill = (input_len * 0.0005) # 假设值
-        t_decode = (output_len * 0.01)   # 假设值
-        
-        t_theo = t_prefill + t_decode
-        t_real = p["alpha"] * t_theo + p["beta"]
-        
-        # 估算 AI (用于 DVFS 决策)
-        # AI = FLOPs / Bytes. Decode 阶段 AI 很低 (~10-20)
-        estimated_ai = 20.0 if output_len > input_len else 150.0 
-        
-        # 估算能耗 (Power * Time)
-        # 假设 4090 平均 300W, A100 平均 250W
-        power_avg = 300.0 if "4090" in gpu_name else 250.0
-        energy = power_avg * t_real
-        
-        return t_real, energy, estimated_ai
-
-# -----------------------------------------------------------------------
+from .solver import RouterSolver
+from .predictor import LatencyPredictor
 
 logger = logging.getLogger("LPRouter")
 
 class LPRouter:
-    def __init__(self, hardware_config: Dict):
+    def __init__(self, hardware_config, strategy="LP-Router"):
         """
         初始化路由调度器
-        :param hardware_config: 定义集群有哪些卡，例如 {"gpu_0": "RTX-4090", "gpu_1": "A100"}
+        :param hardware_config: 集群配置 {0: "RTX-4090", 1: "A100", ...}
+        :param strategy: 调度策略 "LP-Router" | "Random" | "Round-Robin" | "LOR"
         """
         self.hardware_map = hardware_config
-        self.controller = GPUController()
+        self.strategy = strategy
         
-        # 尝试加载真实 Predictor，否则使用 Mock
-        try:
-            from .predictor import LatencyPredictor
-            self.predictor = LatencyPredictor("configs/gpu_specs.json", "configs/model_specs.json")
-            logger.info("Loaded real LatencyPredictor.")
-        except ImportError:
-            self.predictor = MockPredictor()
-            logger.warning("Using MockPredictor (src.predictor not found).")
+        # --- 核心组件初始化 ---
+        if self.strategy == "LP-Router":
+            self.solver = RouterSolver()
+            self.predictor = LatencyPredictor()
+            logger.info("LP-Router mode initialized with Solver and Predictor.")
+        else:
+            logger.info(f"Router initialized in Baseline mode: {self.strategy}")
 
-        # 求解器参数
-        self.solver_timeout_ms = 20  # 超过 20ms 还没解出来就降级
+        # --- 基线策略状态变量 ---
+        self.rr_index = 0 # 轮询指针
+        # LOR (Least Outstanding Requests) 计数器
+        # 在真实系统中这里应该对接 vLLM 的实时队列长度，仿真时我们用累计分配数模拟
+        self.lor_counts = {gid: 0 for gid in hardware_config.keys()}
 
     def schedule(self, requests: List[Dict], slo_ms: float = 200.0) -> Dict:
         """
-        核心调度入口
-        :param requests: 请求列表 [{"id": "req1", "prompt_len": 128, ...}, ...]
-        :param slo_ms: 目标延迟 (TTFT 或 Total Latency)
-        :return: 分配方案 {"req1": {"gpu_id": 0, "power_limit": 300}, ...}
+        调度入口：根据策略分发到不同的处理逻辑
+        """
+        if not requests:
+            return {}
+
+        if self.strategy == "Random":
+            return self._solve_random(requests)
+        elif self.strategy == "Round-Robin":
+            return self._solve_rr(requests)
+        elif self.strategy == "LOR":
+            return self._solve_lor(requests)
+        else:
+            # 默认走我们的核心算法
+            return self._solve_smart(requests, slo_ms)
+
+    def _solve_smart(self, requests, slo_ms):
+        """
+        核心算法：预测 -> 构建矩阵 -> ILP求解
         """
         start_time = time.time()
         
-        # 1. 准备数据矩阵
-        #    Cost Matrix: Energy[i][j], Latency[i][j]
         req_ids = [r["id"] for r in requests]
         gpu_ids = list(self.hardware_map.keys())
+        num_reqs = len(requests)
+        num_gpus = len(gpu_ids)
         
-        cost_energy = np.zeros((len(requests), len(gpu_ids)))
-        constraint_latency = np.zeros((len(requests), len(gpu_ids)))
-        predicted_ais = np.zeros((len(requests), len(gpu_ids))) # 用于 DVFS 决策
+        # 1. 准备数据矩阵
+        cost_energy = np.zeros((num_reqs, num_gpus))
+        constraint_latency = np.zeros((num_reqs, num_gpus))
         
         for i, req in enumerate(requests):
+            model_name = req.get("model", "qwen3-8b") # 获取模型名
+            
             for j, gid in enumerate(gpu_ids):
-                gpu_model = self.hardware_map[gid]
-                # 调用预测器 (这是论文的核心贡献点！)
-                lat, eng, ai = self.predictor.predict(req, gpu_model)
+                gpu_name = self.hardware_map[gid]
                 
-                constraint_latency[i, j] = lat * 1000.0 # 转为 ms
-                cost_energy[i, j] = eng
-                predicted_ais[i, j] = ai
+                # 调用预测器
+                # predict 返回 (latency_ms, energy_joules)
+                lat_ms, eng_j = self.predictor.predict(req, gpu_name, model_name)
+                
+                constraint_latency[i, j] = lat_ms
+                cost_energy[i, j] = eng_j
 
-        # 2. 调用 Solver 求解 (ILP)
-        assignments = self._solve_ilp_ortools(req_ids, gpu_ids, cost_energy, constraint_latency, slo_ms)
+        # 2. 调用 Solver 求解
+        # 注意：这里调用的是 src/solver.py 中封装好的 solve 方法
+        assignments = self.solver.solve(req_ids, gpu_ids, cost_energy, constraint_latency, slo_ms)
         
-        # 3. 后处理：生成决策并加入 DVFS 逻辑
+        # 3. 容错处理：如果 ILP 求解失败 (比如超时或无解)，降级为 LOR
+        if assignments is None:
+            logger.warning(f"ILP Solver failed for batch {req_ids[0]}... Fallback to LOR.")
+            return self._solve_lor(requests)
+
+        # 4. 结果包装
         final_decision = {}
-        
         for req_idx, gpu_idx in assignments.items():
             req_id = req_ids[req_idx]
             gpu_id = gpu_ids[gpu_idx]
-            ai = predicted_ais[req_idx, gpu_idx]
             
-            # === 论文 4.3.3 DVFS 策略 ===
-            # 如果判定为 Memory Bound (AI < 30 且是 Decode 阶段)，可以安全降功耗
-            # 4090 的 Ridge Point 很高，但在 Decode 阶段 AI 极低
-            power_cap = None
-            if "RTX-4090" in self.hardware_map[gpu_id]:
-                if ai < 50: # Memory Bound 阈值 (需要实验标定)
-                    power_cap = 300 # 降频节能模式
-                else:
-                    power_cap = 450 # 性能模式
+            # 更新 LOR 计数 (保持状态同步)
+            self.lor_counts[gpu_id] += 1
             
-            # 注意：实际控制通常是异步的，或者按 Batch 统一设置。
-            # 这里为了演示，将指令附带在决策中
             final_decision[req_id] = {
                 "gpu_id": gpu_id,
                 "gpu_model": self.hardware_map[gpu_id],
                 "expected_latency": constraint_latency[req_idx, gpu_idx],
-                "set_power_limit": power_cap
+                "strategy": "ILP_Energy_Optimized"
             }
 
         elapsed = (time.time() - start_time) * 1000
-        logger.info(f"Scheduling completed in {elapsed:.2f}ms. Assigned {len(final_decision)}/{len(requests)} requests.")
-        
+        logger.info(f"[LP-Router] Batch scheduled in {elapsed:.2f}ms")
         return final_decision
-
-    def _solve_ilp_ortools(self, req_ids, gpu_ids, energy_matrix, latency_matrix, slo_ms):
-        """
-        使用 OR-Tools 进行整数规划求解
-        目标: Min(Total Energy)
-        约束: Latency <= SLO (软约束)
-        """
-        solver = pywraplp.Solver.CreateSolver('SCIP')
-        if not solver:
-            logger.warning("SCIP solver unavailable, falling back to Greedy.")
-            return self._solve_greedy(req_ids, gpu_ids, energy_matrix, latency_matrix, slo_ms)
-
-        # 变量定义
-        x = {} # x[i, j] = 1
-        num_reqs = len(req_ids)
-        num_gpus = len(gpu_ids)
-        infinity = solver.infinity()
-        
-        # 引入松弛变量 slack[i] 以避免无解 (Hard Constraint -> Soft Constraint)
-        slack = {} 
-
-        for i in range(num_reqs):
-            slack[i] = solver.NumVar(0, infinity, f"slack_{i}")
-            for j in range(num_gpus):
-                x[i, j] = solver.BoolVar(f"x_{i}_{j}")
-
-        # 约束 1: 每个请求必须分配给 1 个 GPU
-        for i in range(num_reqs):
-            solver.Add(sum(x[i, j] for j in range(num_gpus)) == 1)
-
-        # 约束 2: 延迟约束 (Latency <= SLO + slack)
-        for i in range(num_reqs):
-            # sum(x[i,j] * lat[i,j]) <= SLO + slack[i]
-            solver.Add(
-                sum(x[i, j] * latency_matrix[i, j] for j in range(num_gpus)) 
-                <= slo_ms + slack[i]
-            )
-
-        # 约束 3 (隐式): 显存容量/Batch容量约束 (这里暂时略过，需 Predictor 提供显存预估)
-        
-        # 目标函数: Min (Total Energy + Penalty * Total Slack)
-        objective = solver.Objective()
-        PENALTY_WEIGHT = 500.0 # 1ms 的违约相当于 500J 的惩罚，迫使尽量满足 SLO
-        
-        for i in range(num_reqs):
-            objective.SetCoefficient(slack[i], PENALTY_WEIGHT)
-            for j in range(num_gpus):
-                objective.SetCoefficient(x[i, j], energy_matrix[i, j])
-        
-        objective.SetMinimization()
-        
-        # 设置求解超时
-        solver.set_time_limit(self.solver_timeout_ms)
-
-        status = solver.Solve()
-        
-        assignments = {}
-        if status in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
-            for i in range(num_reqs):
-                for j in range(num_gpus):
-                    if x[i, j].solution_value() > 0.5:
-                        assignments[i] = j
-                        break
-        else:
-            logger.warning("Solver failed or timed out. Falling back to Greedy.")
-            return self._solve_greedy(req_ids, gpu_ids, energy_matrix, latency_matrix, slo_ms)
-            
-        return assignments
 
     def _solve_greedy(self, req_ids, gpu_ids, energy_matrix, latency_matrix, slo_ms):
         """
@@ -237,6 +147,58 @@ class LPRouter:
                 assignments[i] = best_latency_gpu
                 
         return assignments
+
+    def _solve_random(self, requests):
+        final_decision = {}
+        gpu_ids = list(self.hardware_map.keys())
+        for req in requests:
+            gid = random.choice(gpu_ids)
+            self.lor_counts[gid] += 1
+            final_decision[req["id"]] = {
+                "gpu_id": gid, 
+                "gpu_model": self.hardware_map[gid],
+                # 基线策略不做预测，这里用 None 占位，后续由 logger 兼容处理
+                "expected_latency": None,
+                "strategy": "Random"
+            }
+        return final_decision
+
+    def _solve_rr(self, requests):
+        final_decision = {}
+        gpu_ids = list(self.hardware_map.keys())
+        num_gpus = len(gpu_ids)
+        for req in requests:
+            gid = gpu_ids[self.rr_index % num_gpus]
+            self.rr_index += 1
+            self.lor_counts[gid] += 1
+            final_decision[req["id"]] = {
+                "gpu_id": gid,
+                "gpu_model": self.hardware_map[gid],
+                # 基线策略不做预测，这里用 None 占位，后续由 logger 兼容处理
+                "expected_latency": None,
+                "strategy": "Round-Robin"
+            }
+        return final_decision
+
+    def _solve_lor(self, requests):
+        """
+        Least Outstanding Requests (模拟)
+        选择当前分配数最少的节点
+        """
+        final_decision = {}
+        for req in requests:
+            # 找到计数最小的 GPU ID
+            best_gid = min(self.lor_counts, key=self.lor_counts.get)
+            
+            self.lor_counts[best_gid] += 1
+            final_decision[req["id"]] = {
+                "gpu_id": best_gid,
+                "gpu_model": self.hardware_map[best_gid],
+                # 基线策略不做预测，这里用 None 占位，后续由 logger 兼容处理
+                "expected_latency": None,
+                "strategy": "LOR"
+            }
+        return final_decision
 
 # 使用示例 (仅用于测试)
 if __name__ == "__main__":
